@@ -27,16 +27,18 @@ for path in ("http://localhost:8001/pending", "http://localhost:8001/media/1", "
         error.close()
 print("PASS inbox, attachments, and graph API reject unauthenticated requests")
 
-if env.get("LOGSEQ_SYNC_IMAGE") in ("training-hub-logseq-sync:69da7e-selfhost3", "training-hub-logseq-sync:69da7e-selfhost4", "training-hub-logseq-sync:69da7e-selfhost5", "training-hub-logseq-sync:69da7e-selfhost6"):
+if env.get("LOGSEQ_SYNC_IMAGE") in ("training-hub-logseq-sync:69da7e-selfhost3", "training-hub-logseq-sync:69da7e-selfhost4", "training-hub-logseq-sync:69da7e-selfhost5", "training-hub-logseq-sync:69da7e-selfhost6", "training-hub-logseq-sync:69da7e-selfhost7"):
     with get("http://localhost:8787/health") as response:
         health = json.load(response)
         assert health.get("account-allowlist") is True
-        if env.get("LOGSEQ_SYNC_IMAGE") in ("training-hub-logseq-sync:69da7e-selfhost4", "training-hub-logseq-sync:69da7e-selfhost5", "training-hub-logseq-sync:69da7e-selfhost6"):
+        if env.get("LOGSEQ_SYNC_IMAGE") in ("training-hub-logseq-sync:69da7e-selfhost4", "training-hub-logseq-sync:69da7e-selfhost5", "training-hub-logseq-sync:69da7e-selfhost6", "training-hub-logseq-sync:69da7e-selfhost7"):
             assert health.get("journal-checklists") is True
-            if env.get("LOGSEQ_SYNC_IMAGE") in ("training-hub-logseq-sync:69da7e-selfhost5", "training-hub-logseq-sync:69da7e-selfhost6"):
+            if env.get("LOGSEQ_SYNC_IMAGE") in ("training-hub-logseq-sync:69da7e-selfhost5", "training-hub-logseq-sync:69da7e-selfhost6", "training-hub-logseq-sync:69da7e-selfhost7"):
                 assert health.get("shared-graphs") is True
-                if env.get("LOGSEQ_SYNC_IMAGE") == "training-hub-logseq-sync:69da7e-selfhost6":
+                if env.get("LOGSEQ_SYNC_IMAGE") in ("training-hub-logseq-sync:69da7e-selfhost6", "training-hub-logseq-sync:69da7e-selfhost7"):
                     assert health.get("boolean-checklists") is True
+                if env.get("LOGSEQ_SYNC_IMAGE") == "training-hub-logseq-sync:69da7e-selfhost7":
+                    assert health.get("graph-chat-setup") is True
     policy = dict(line.split("=", 1) for line in (root / ".secrets/sync-policy.env").read_text().splitlines() if "=" in line)
     with get("http://localhost:8787/training/allowlist", {"Authorization": "Bearer " + policy["TRAINING_ALLOWLIST_TOKEN"]}) as response:
         assert json.load(response)["owner"] == policy["TRAINING_OWNER_EMAIL"].strip().lower()

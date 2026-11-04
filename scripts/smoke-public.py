@@ -33,18 +33,20 @@ print("PASS attachments require Basic authentication")
 
 with urlopen(f"https://{ip}:8443/health", timeout=15) as response:
     assert response.status == 200
-    if env.get("LOGSEQ_SYNC_IMAGE") in ("training-hub-logseq-sync:69da7e-selfhost3", "training-hub-logseq-sync:69da7e-selfhost4", "training-hub-logseq-sync:69da7e-selfhost5", "training-hub-logseq-sync:69da7e-selfhost6"):
+    if env.get("LOGSEQ_SYNC_IMAGE") in ("training-hub-logseq-sync:69da7e-selfhost3", "training-hub-logseq-sync:69da7e-selfhost4", "training-hub-logseq-sync:69da7e-selfhost5", "training-hub-logseq-sync:69da7e-selfhost6", "training-hub-logseq-sync:69da7e-selfhost7"):
         health = json.load(response)
         assert health.get("account-allowlist") is True
-        if env.get("LOGSEQ_SYNC_IMAGE") in ("training-hub-logseq-sync:69da7e-selfhost4", "training-hub-logseq-sync:69da7e-selfhost5", "training-hub-logseq-sync:69da7e-selfhost6"):
+        if env.get("LOGSEQ_SYNC_IMAGE") in ("training-hub-logseq-sync:69da7e-selfhost4", "training-hub-logseq-sync:69da7e-selfhost5", "training-hub-logseq-sync:69da7e-selfhost6", "training-hub-logseq-sync:69da7e-selfhost7"):
             assert health.get("journal-checklists") is True
-            if env.get("LOGSEQ_SYNC_IMAGE") in ("training-hub-logseq-sync:69da7e-selfhost5", "training-hub-logseq-sync:69da7e-selfhost6"):
+            if env.get("LOGSEQ_SYNC_IMAGE") in ("training-hub-logseq-sync:69da7e-selfhost5", "training-hub-logseq-sync:69da7e-selfhost6", "training-hub-logseq-sync:69da7e-selfhost7"):
                 assert health.get("shared-graphs") is True
-                if env.get("LOGSEQ_SYNC_IMAGE") == "training-hub-logseq-sync:69da7e-selfhost6":
+                if env.get("LOGSEQ_SYNC_IMAGE") in ("training-hub-logseq-sync:69da7e-selfhost6", "training-hub-logseq-sync:69da7e-selfhost7"):
                     assert health.get("boolean-checklists") is True
+                if env.get("LOGSEQ_SYNC_IMAGE") == "training-hub-logseq-sync:69da7e-selfhost7":
+                    assert health.get("graph-chat-setup") is True
 print("PASS sync HTTPS")
 
-for path in ("/training/graphs", "/training/allowlist", "/admin/graphs/00000000-0000-4000-8000-000000000000"):
+for path in ("/training/graphs", "/training/graph-access", "/training/allowlist", "/admin/graphs/00000000-0000-4000-8000-000000000000"):
     try:
         with urlopen(f"https://{ip}:8443" + path, timeout=15):
             raise AssertionError("Public management endpoint accepted a request")
@@ -65,7 +67,7 @@ print("PASS graph API and attachments still require authentication")
 fake_claims = {"sub": "00000000-0000-4000-8000-000000000000", "exp": int(time.time()) + 600,
                "iss": "https://cognito-idp.us-east-1.amazonaws.com/us-east-1_dtagLnju8",
                "aud": "69cs1lgme7p8kbgld8n5kseii6", "token_use": "id"}
-if env.get("LOGSEQ_SYNC_IMAGE") in ("training-hub-logseq-sync:69da7e-selfhost3", "training-hub-logseq-sync:69da7e-selfhost4", "training-hub-logseq-sync:69da7e-selfhost5", "training-hub-logseq-sync:69da7e-selfhost6"):
+if env.get("LOGSEQ_SYNC_IMAGE") in ("training-hub-logseq-sync:69da7e-selfhost3", "training-hub-logseq-sync:69da7e-selfhost4", "training-hub-logseq-sync:69da7e-selfhost5", "training-hub-logseq-sync:69da7e-selfhost6", "training-hub-logseq-sync:69da7e-selfhost7"):
     policy = dict(line.split("=", 1) for line in (root / ".secrets/sync-policy.env").read_text().splitlines() if "=" in line)
     fake_claims.update(email=policy["TRAINING_OWNER_EMAIL"], email_verified=True)
 encoded = lambda value: base64.urlsafe_b64encode(json.dumps(value).encode()).decode().rstrip("=")
@@ -83,7 +85,7 @@ for authorization in (None, "Bearer " + unsigned_token):
         error.close()
 print("PASS token creation rejects missing and unsigned login tokens")
 
-if env.get("LOGSEQ_SYNC_IMAGE") in ("training-hub-logseq-sync:69da7e-selfhost3", "training-hub-logseq-sync:69da7e-selfhost4", "training-hub-logseq-sync:69da7e-selfhost5", "training-hub-logseq-sync:69da7e-selfhost6"):
+if env.get("LOGSEQ_SYNC_IMAGE") in ("training-hub-logseq-sync:69da7e-selfhost3", "training-hub-logseq-sync:69da7e-selfhost4", "training-hub-logseq-sync:69da7e-selfhost5", "training-hub-logseq-sync:69da7e-selfhost6", "training-hub-logseq-sync:69da7e-selfhost7"):
     token = (root / ".secrets/logseq-token").read_text().strip()
     key = json.loads((root / ".secrets/logseq-encryption.json").read_text())
     assert token and key["graph_id"] == env["LOGSEQ_GRAPH_ID"]

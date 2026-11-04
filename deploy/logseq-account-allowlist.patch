@@ -96,12 +96,12 @@
             path (.-pathname url)
             method (.-method request)]
         (cond
-+         (contains? #{"/training/allowlist" "/training/graphs"} path)
++         (contains? #{"/training/allowlist" "/training/graphs" "/training/graph-access"} path)
 +         (allowlist/handle request env)
 +
           (= path "/health")
 -         (http/json-response :worker/health {:ok true})
-+         (http/json-response :worker/health {:ok true :account-allowlist true :journal-checklists true :shared-graphs true :boolean-checklists true})
++         (http/json-response :worker/health {:ok true :account-allowlist true :journal-checklists true :shared-graphs true :boolean-checklists true :graph-chat-setup true})
  
           (= path "/openapi.json")
           (http/json-response nil (semantic-routes/openapi-document (or (aget env "COGNITO_ISSUER") "")))

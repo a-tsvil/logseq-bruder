@@ -37,3 +37,20 @@ test('rejects unsupported private-key versions', async () => {
   const { unlockGraphKey } = await import('../scripts/unlock-graph-key.mjs');
   await assert.rejects(unlockGraphKey({ encrypted_private_key: '["20990101","~b","~b","~b"]' }, 'test-password'), /Unsupported key version/);
 });
+
+test('stdin helper returns only the graph key and never echoes a failed password', async () => {
+  const { spawnSync } = require('node:child_process');
+  const { bundle, expected } = await fixture('20251210');
+  const helper = require('node:path').resolve(__dirname, '../scripts/unlock-graph-key.mjs');
+  const good = spawnSync(process.execPath, [helper], {
+    input: JSON.stringify({ bundle, password: 'test-password' }), encoding: 'utf8',
+  });
+  assert.equal(good.status, 0);
+  assert.deepEqual(JSON.parse(good.stdout), { graph_id: 'test-graph', key: expected });
+  const bad = spawnSync(process.execPath, [helper], {
+    input: JSON.stringify({ bundle, password: 'private-wrong-password' }), encoding: 'utf8',
+  });
+  assert.equal(bad.status, 1);
+  assert.equal(bad.stdout, '');
+  assert.ok(!bad.stderr.includes('private-wrong-password'));
+});

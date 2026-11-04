@@ -26,7 +26,7 @@ class InboxTests(unittest.TestCase):
         activity.start()
         self.addCleanup(activity.stop)
         self.temporary = tempfile.TemporaryDirectory()
-        self.inbox = Inbox(self.temporary.name, "101,202")
+        self.inbox = Inbox(self.temporary.name, "101,202", graph_id="test-graph")
         description_patch = patch("src.inbox.fetch_description", return_value={"status": "empty"})
         self.description_fetch = description_patch.start()
         self.addCleanup(description_patch.stop)
@@ -80,7 +80,7 @@ class InboxTests(unittest.TestCase):
     def test_cooking_wait_survives_restart_and_accepts_video_attachment(self):
         self.inbox.remember([update(1, text="/cook")])
         self.inbox.db.close()
-        self.inbox = Inbox(self.temporary.name, "101,202")
+        self.inbox = Inbox(self.temporary.name, "101,202", graph_id="test-graph")
         self.inbox.remember([update(2, text="", attachment={"file_id": "video", "mime_type": "video/mp4"})])
         self.assertEqual(self.record(2)["analysis"]["type"], "cooking")
         self.assertEqual(self.record(2)["attachment"]["file_id"], "video")

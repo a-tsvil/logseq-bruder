@@ -1,6 +1,7 @@
 (ns logseq.db-sync.worker.allowlist
   (:require [clojure.string :as string]
             [logseq.db-sync.common :as common]
+            [logseq.db-sync.index :as index]
             [logseq.db-sync.worker.http :as http]
             [promesa.core :as p]))
 
@@ -50,6 +51,45 @@
                 (when-not (.-ok response)
                   (throw (js/Error. "Could not close revoked sessions"))))))))))))
 
+(defn- <graph-access [request env]
+  (let [url (js/URL. (.-url request))
+        email (normalize-email (.get (.-searchParams url) "email"))
+        graph-id (.get (.-searchParams url) "graph_id")
+        method (.-method request)]
+    (cond
+      (not (contains? #{"GET" "POST"} method)) (http/error-response "method not allowed" 405)
+      (or (nil? email) (not (re-matches #"[0-9a-f-]{36}" (or graph-id ""))))
+      (http/bad-request "invalid graph or email")
+      :else
+      (p/let [rows (<rows env
+                         (str "SELECT u.id AS user_id, g.graph_e2ee, r.encrypted_private_key, a.encrypted_aes_key FROM graphs g "
+                              "JOIN users u ON lower(u.email) = ? AND u.email_verified = 1 "
+                              "LEFT JOIN user_rsa_keys r ON r.user_id = u.id "
+                              "LEFT JOIN graph_aes_keys a ON a.graph_id = g.graph_id AND a.user_id = u.id "
+                              "WHERE g.graph_id = ? AND g.graph_ready_for_use = 1 "
+                              "AND (lower(u.email) = ? OR EXISTS (SELECT 1 FROM training_allowed_accounts t WHERE t.email = lower(u.email))) "
+                              "AND (g.user_id = u.id OR EXISTS (SELECT 1 FROM graph_members m WHERE m.graph_id = g.graph_id AND m.user_id = u.id))")
+                         email graph-id (normalize-email (aget env "TRAINING_OWNER_EMAIL")))
+              row (first rows)]
+        (if-not row
+          (http/forbidden)
+          (if (= method "GET")
+            (http/json-response nil {:graph_id graph-id :encrypted (not (contains? #{0 "0" false} (aget row "graph_e2ee")))
+                                     :encrypted_private_key (aget row "encrypted_private_key")
+                                     :encrypted_aes_key (aget row "encrypted_aes_key")})
+            (let [bytes (js/Uint8Array. 32)
+                  _ (.getRandomValues js/crypto bytes)
+                  token (str "logseq_pat_"
+                             (apply str (map #(.padStart (.toString % 16) 2 "0") (array-seq bytes))))
+                  now (common/now-ms)]
+              (p/let [digest (.digest (.-subtle js/crypto) "SHA-256" (.encode (js/TextEncoder.) token))
+                      hash (apply str (map #(.padStart (.toString % 16) 2 "0") (array-seq (js/Uint8Array. digest))))
+                      _ (index/<personal-access-token-create!
+                         (aget env "DB") {:id (str (random-uuid)) :user-id (aget row "user_id")
+                                          :graph-id graph-id :token-hash hash :token-prefix (subs token 0 23)
+                                          :permission "both" :created-at now :expires-at (+ now (* 365 24 60 60 1000))})]
+                (http/json-response nil {:graph_id graph-id :token token :expires_at (+ now (* 365 24 60 60 1000))})))))))))
+
 (defn handle [request env]
   (let [secret (aget env "TRAINING_ALLOWLIST_TOKEN")
         supplied (.get (.-headers request) "authorization")]
@@ -57,6 +97,9 @@
       (not (and (string? secret) (>= (count secret) 64)
                 (= supplied (str "Bearer " secret))))
       (http/unauthorized)
+
+      (= "/training/graph-access" (.-pathname (js/URL. (.-url request))))
+      (<graph-access request env)
 
       (and (= "/training/graphs" (.-pathname (js/URL. (.-url request))))
            (not= "GET" (.-method request)))

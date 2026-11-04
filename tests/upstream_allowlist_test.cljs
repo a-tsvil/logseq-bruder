@@ -1,6 +1,7 @@
 (ns logseq.db-sync.allowlist-test
   (:require [logseq.db-sync.worker.allowlist :as allowlist]
             [logseq.db-sync.worker.auth :as auth]
+            [logseq.db-sync.graph-setup-test :as graph-setup-test]
             [logseq.db-sync.proxy-origin-test :as proxy-test]
             [logseq.db-sync.checklist-test :as checklist-test]
             [logseq.common.authorization :as authorization]
@@ -64,7 +65,8 @@
                                           payload (assoc :body (js/JSON.stringify (clj->js payload)))))))]
     (assert (= "brother@example.com" (allowlist/normalize-email " BROTHER@EXAMPLE.COM ")))
     (assert (nil? (allowlist/normalize-email "bad\n@example.com")))
-    (-> (p/let [allowed (allowlist/<allowed-claims env owner)
+    (-> (p/let [_ (graph-setup-test/main)
+                allowed (allowlist/<allowed-claims env owner)
                 allowed-brother (allowlist/<allowed-claims env brother)
                 denied (allowlist/<allowed-claims env outsider)
                 unverified (allowlist/<allowed-claims env #js {:email "owner@example.com" :email_verified false})

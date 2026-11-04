@@ -199,7 +199,7 @@ class ChecklistTests(unittest.TestCase):
         self.assertEqual(self.box.db.execute("SELECT count(*) FROM user_graphs").fetchone()[0], 0)
         self.assertEqual(self.box.db.execute("SELECT count(*) FROM submissions").fetchone()[0], 0)
 
-    def test_graph_picker_excludes_setup_required_buttons_and_disambiguates_names(self):
+    def test_graph_picker_includes_connect_buttons_and_disambiguates_names(self):
         self.box.logseq_users = {"101": "owner@example.com"}
         self.box.allowlist_token = "management-secret"
         unconfigured = "33333333-3333-4333-8333-333333333333"
@@ -208,9 +208,9 @@ class ChecklistTests(unittest.TestCase):
                               {"id": unconfigured, "name": "Needs setup"}]}
         with patch("src.inbox.request_json", return_value=graphs):
             text = self.box.graph_command("/select_graph", 101)
-            self.assertIn("Needs setup — bot setup required", text)
+            self.assertIn("Needs setup — tap to connect", text)
             buttons = self.box.graph_keyboard["inline_keyboard"]
-            self.assertEqual(len(buttons), 2)
+            self.assertEqual(len(buttons), 3)
             self.assertIn(self.primary, buttons[0][0]["text"])
             self.assertIn(self.other, buttons[1][0]["text"])
             self.box.remember([self.graph_choice(1, graph=unconfigured)])
@@ -401,10 +401,10 @@ class ChecklistTests(unittest.TestCase):
             return {"graphs": rows}
         with patch("src.inbox.request_json", side_effect=discover):
             listing = self.box.graph_command("/graphs", 101)
-            self.assertIn("Shopping Lists — bot setup required", listing)
+            self.assertIn("Shopping Lists — tap to connect", listing)
             self.assertIn("Other graph — ready", listing)
             self.assertNotIn("Shopping Lists", self.box.graph_command("/graphs", 202))
-            self.assertIn("setup is required", self.box.graph_command('/graph "Shopping Lists"', 101))
+            self.assertIn("Upgrade the sync worker", self.box.graph_command('/graph "Shopping Lists"', 101))
             with self.assertRaisesRegex(ValueError, "setup is required"):
                 self.box.parse_checklist('/checklist "Shopping Lists"\nItem', 101)
             self.assertEqual(self.box.selected_graph(101), self.primary)

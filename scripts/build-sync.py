@@ -9,7 +9,7 @@ import tempfile
 root = Path(__file__).resolve().parents[1]
 wrapper_ref = "7708e3dc9412f0308379a51fe8c6be8c82bd95c2"
 logseq_ref = "69da7e2215b336cc5123dafb2a1686996e39596c"
-image = "training-hub-logseq-sync:69da7e-selfhost6"
+image = "training-hub-logseq-sync:69da7e-selfhost7"
 
 with tempfile.TemporaryDirectory(prefix="training-sync-build-") as temporary:
     context = Path(temporary)
@@ -21,6 +21,7 @@ with tempfile.TemporaryDirectory(prefix="training-sync-build-") as temporary:
     for name, source_path in (("account-allowlist.patch", "deploy/logseq-account-allowlist.patch"),
                               ("allowlist.cljs", "deploy/sync_allowlist.cljs"),
                               ("allowlist_test.cljs", "tests/upstream_allowlist_test.cljs"),
+                              ("graph_setup_test.cljs", "tests/upstream_graph_setup_test.cljs"),
                               ("checklist_test.cljs", "tests/upstream_checklist_test.cljs"),
                               ("journal-checklists.patch", "deploy/logseq-journal-checklists.patch"),
                               ("boolean-checklists.patch", "deploy/logseq-boolean-checklists.patch"),
@@ -43,6 +44,7 @@ with tempfile.TemporaryDirectory(prefix="training-sync-build-") as temporary:
     source = source.replace(release,
                             "COPY proxy_origin_test.cljs /src/deps/db-sync/test/logseq/db_sync/proxy_origin_test.cljs\n"
                             "COPY allowlist_test.cljs /src/deps/db-sync/test/logseq/db_sync/allowlist_test.cljs\n"
+                            "COPY graph_setup_test.cljs /src/deps/db-sync/test/logseq/db_sync/graph_setup_test.cljs\n"
                             "COPY checklist_test.cljs /src/deps/db-sync/test/logseq/db_sync/checklist_test.cljs\n"
                             "RUN mise exec -- node -e " + shlex.quote(configure_test) + "\n"
                             "RUN mise exec -- clojure -M:cljs compile db-sync-policy-test && mise exec -- node worker/dist/policy-test.js\n"

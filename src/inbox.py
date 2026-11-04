@@ -130,8 +130,12 @@ class Inbox:
         self.db.execute("CREATE TABLE IF NOT EXISTS state (id INTEGER PRIMARY KEY CHECK(id=1), offset INTEGER NOT NULL)")
         self.db.execute("INSERT OR IGNORE INTO state VALUES (1, 0)")
         self.db.execute("CREATE TABLE IF NOT EXISTS submissions (id INTEGER PRIMARY KEY, record TEXT NOT NULL, done INTEGER NOT NULL DEFAULT 0, attempted INTEGER NOT NULL DEFAULT 0)")
+        (self.data / "inbox.sqlite").chmod(0o600)
+        self.db.execute("CREATE TABLE IF NOT EXISTS graph_credentials (user_id INTEGER NOT NULL, graph_id TEXT NOT NULL, name TEXT NOT NULL, token TEXT NOT NULL, key TEXT, expires_at INTEGER NOT NULL, PRIMARY KEY(user_id,graph_id))")
+        self.db.execute("CREATE TABLE IF NOT EXISTS graph_unlocks (user_id INTEGER PRIMARY KEY, graph_id TEXT NOT NULL, requested_at INTEGER NOT NULL, attempts INTEGER NOT NULL DEFAULT 0)")
         self.db.execute("CREATE TABLE IF NOT EXISTS user_graphs (user_id INTEGER PRIMARY KEY, graph_id TEXT NOT NULL)")
         self.db.execute("CREATE TABLE IF NOT EXISTS checklist_drafts (user_id INTEGER PRIMARY KEY, draft TEXT NOT NULL)")
+        self.db.execute("CREATE TABLE IF NOT EXISTS note_drafts (user_id INTEGER PRIMARY KEY, draft TEXT NOT NULL)")
         self.db.execute("CREATE TABLE IF NOT EXISTS cooking_requests (user_id INTEGER PRIMARY KEY)")
         self.db.execute("CREATE TABLE IF NOT EXISTS bot_users (user_id INTEGER PRIMARY KEY, name TEXT NOT NULL, "
                         "status TEXT NOT NULL, requested_at INTEGER NOT NULL DEFAULT (unixepoch()))")
@@ -314,7 +318,11 @@ class Inbox:
 
     def graph_catalog(self, user_id=None):
         default = [{"id": self.graph_id, "name": self.graph_name or self.graph_id}] if self.graph_id else []
+        credential_user = self.admin_id if user_id is None or self.registered_user(user_id) else user_id
+        automatic = [{"id": row[0], "name": row[1]} for row in self.db.execute(
+            "SELECT graph_id,name FROM graph_credentials WHERE user_id=? AND expires_at>?", (credential_user, int(time.time() * 1000)))]
         configured = default + self.extra_graphs
+        configured += [g for g in automatic if g["id"] not in {item["id"] for item in configured}]
         if user_id is None:
             return configured
         if self.registered_user(user_id):
@@ -386,9 +394,9 @@ class Inbox:
                 label = graph["name"] + (f" [{graph['id']}]" if duplicate else "")
                 button_label = label
                 label += " (selected)" if graph["id"] == current else ""
-                label += " — ready" if graph["enabled"] else " — bot setup required"
+                label += " — ready" if graph["enabled"] else " — tap to connect"
                 lines.append(label)
-                if graph["enabled"]:
+                if graph["enabled"] or str(user_id) in self.logseq_users:
                     buttons.append([{"text": ("✓ " if graph["id"] == current else "") + button_label,
                                      "callback_data": f"graph:{user_id}:{graph['id']}"}])
             self.graph_keyboard = {"inline_keyboard": buttons}
@@ -402,8 +410,9 @@ class Inbox:
             graph = self.find_graph(args[1], user_id)
             if not graph:
                 return "Graph not available to you. Use /select_graph to choose an available graph."
+            self.db.execute("DELETE FROM graph_unlocks WHERE user_id=?", (user_id,))
             if not graph["enabled"]:
-                return "Graph found, but bot setup is required: a scoped token, plus an encryption key for encrypted graphs."
+                return self.connect_graph(graph, user_id)
             self.db.execute("INSERT INTO user_graphs VALUES (?,?) ON CONFLICT(user_id) DO UPDATE SET graph_id=excluded.graph_id",
                             (user_id, graph["id"]))
             return "Selected graph: " + graph["name"]
@@ -422,6 +431,8 @@ class Inbox:
                     reply = self.graph_command("/graph " + match[2], sender)
                 text = self.graph_command("/select_graph", sender)
                 if self.bot_token:
+                    if self.db.execute("SELECT 1 FROM graph_unlocks WHERE user_id=?", (sender,)).fetchone():
+                        self.telegram("sendMessage", {"chat_id": sender, "text": reply})
                     try:
                         self.telegram("editMessageText", {"chat_id": sender, "message_id": message["message_id"],
                                                          "text": text, "reply_markup": self.graph_keyboard or {"inline_keyboard": []}})
@@ -433,12 +444,100 @@ class Inbox:
             except (HTTPError, URLError, TimeoutError, OSError, ValueError):
                 pass
 
+    def graph_access(self, graph_id, user_id, method=None):
+        email = self.logseq_users.get(str(user_id))
+        if not email or not self.allowlist_token:
+            raise ValueError("Link your Telegram account to Logseq before connecting graphs.")
+        response = request_json(self.api_url + "/training/graph-access?email=" + quote(email, safe="")
+                                + "&graph_id=" + quote(graph_id, safe=""),
+                                headers={"Authorization": "Bearer " + self.allowlist_token}, method=method)
+        if not isinstance(response, dict) or response.get("graph_id") != graph_id:
+            raise ValueError("Graph setup is unavailable. Upgrade the sync worker and retry /select_graph.")
+        return response
+
+    def connect_graph(self, graph, user_id, password=None):
+        bundle = self.graph_access(graph["id"], user_id)
+        if type(bundle.get("encrypted")) is not bool:
+            raise ValueError("Graph setup returned invalid encryption metadata.")
+        key = None
+        if bundle["encrypted"]:
+            if not all(isinstance(bundle.get(k), str) and bundle[k] for k in ("encrypted_private_key", "encrypted_aes_key")):
+                raise ValueError("Open this shared graph in Logseq first to set up your encryption keys, then retry.")
+            if password is None:
+                self.db.execute("INSERT OR REPLACE INTO graph_unlocks VALUES (?,?,?,0)", (user_id, graph["id"], int(time.time())))
+                return ("Send your Logseq encryption password to unlock " + graph["name"]
+                        + ". Telegram bot chats are not end-to-end encrypted. I will try to delete your password message immediately; "
+                        "only the graph key is saved. /cancel aborts. This request expires in 5 minutes.")
+            helper = Path(__file__).resolve().parent / "unlock-graph-key.mjs"
+            if not helper.exists():
+                helper = helper.parent.parent / "scripts/unlock-graph-key.mjs"
+            result = subprocess.run(["node", str(helper)],
+                                    input=json.dumps({"bundle": bundle, "password": password}),
+                                    text=True, capture_output=True, timeout=30)
+            if result.returncode:
+                raise ValueError("Could not unlock this graph. Check your Logseq encryption password and try again, or /cancel.")
+            unlocked = json.loads(result.stdout)
+            key = unlocked.get("key")
+            if unlocked.get("graph_id") != graph["id"] or not isinstance(key, str) or len(base64.b64decode(key, validate=True)) != 32:
+                raise ValueError("Graph setup returned an invalid encryption key.")
+        credentials = self.graph_access(graph["id"], user_id, method="POST")
+        token = credentials.get("token")
+        if not isinstance(token, str) or not token.strip():
+            raise ValueError("Graph setup returned an invalid token.")
+        expires_at = credentials.get("expires_at")
+        if type(expires_at) is not int or expires_at <= time.time() * 1000:
+            raise ValueError("Graph setup returned an invalid token expiration.")
+        self.db.execute("INSERT OR REPLACE INTO graph_credentials VALUES (?,?,?,?,?,?)",
+                        (user_id, graph["id"], graph["name"], token, key, expires_at))
+        self.db.execute("DELETE FROM graph_unlocks WHERE user_id=?", (user_id,))
+        self.db.execute("INSERT OR REPLACE INTO user_graphs VALUES (?,?)", (user_id, graph["id"]))
+        return "Selected graph: " + graph["name"]
+
+    def graph_password(self, message, user_id):
+        pending = self.db.execute("SELECT graph_id,requested_at,attempts FROM graph_unlocks WHERE user_id=?", (user_id,)).fetchone()
+        if not pending:
+            return None
+        text = message.get("text", "")
+        command = text.split(maxsplit=1)[:1]
+        if command in (["/help"], ["/start"]):
+            return None
+        if command in (["/select_graph"], ["/select-graph"], ["/graphs"], ["/graph"], ["/cancel"]):
+            self.db.execute("DELETE FROM graph_unlocks WHERE user_id=?", (user_id,))
+            return "Graph unlock cancelled." if command == ["/cancel"] else None
+        if command and command[0].startswith("/"):
+            return "A graph password is pending. Send it as a text message, or /cancel first."
+        if self.bot_token:
+            try:
+                self.telegram("deleteMessage", {"chat_id": user_id, "message_id": message["message_id"]})
+            except (HTTPError, URLError, TimeoutError, OSError, ValueError):
+                return "Could not delete your message. Delete it yourself. Send /cancel or retry /select_graph."
+        if time.time() - pending[1] > 300 or pending[2] >= 3:
+            self.db.execute("DELETE FROM graph_unlocks WHERE user_id=?", (user_id,))
+            return "Graph unlock expired. Retry /select_graph. Your message was not saved as a note."
+        if not text or len(text) > 1024 or any(k in message for k in ("video", "document", "photo", "animation")):
+            return "Send the encryption password as a text message, or /cancel."
+        self.db.execute("UPDATE graph_unlocks SET attempts=attempts+1 WHERE user_id=?", (user_id,))
+        try:
+            graph = self.find_graph(pending[0], user_id)
+            if not graph:
+                raise ValueError("Graph is no longer shared with you. Retry /select_graph.")
+            return self.connect_graph(graph, user_id, text)
+        except ValueError as error:
+            return str(error)
+        except (HTTPError, URLError, TimeoutError, OSError, subprocess.SubprocessError):
+            return "Unable to connect this graph. Retry your password or /cancel."
+
     def graph_credentials(self, record):
         graph_id = record.get("graph_id") or record.get("encrypted_payload", {}).get("graph_id") or self.graph_id
         if ((self.logseq_users or self.registered_user(record.get("submitted_by")))
                 and (record.get("submitted_by") is None or not self.find_graph(graph_id, record["submitted_by"]))):
             raise ValueError("Graph is no longer available to this submitter; submission remains queued")
-        if graph_id == self.graph_id:
+        credential_user = self.admin_id if self.registered_user(record.get("submitted_by")) else record.get("submitted_by")
+        automatic = self.db.execute("SELECT token,key FROM graph_credentials WHERE user_id=? AND graph_id=? AND expires_at>?",
+                                    (credential_user, graph_id, int(time.time() * 1000))).fetchone()
+        if automatic:
+            token, key = automatic[0], {"graph_id": graph_id, "key": automatic[1]}
+        elif graph_id == self.graph_id:
             token = self.token_file.read_text().strip() if self.token_file and self.token_file.exists() else ""
             key = json.loads(self.encryption_file.read_text()) if self.encryption_file and self.encryption_file.exists() and self.encryption_file.stat().st_size else None
         else:
@@ -461,6 +560,66 @@ class Inbox:
                 or not all(isinstance(t, str) and t for t in encoded)):
             raise ValueError("Invalid encryption response")
         return encoded
+
+    def parse_submission(self, text, user_id, allow_empty=False):
+        command = text.split(maxsplit=1)[0]
+        subject = "note" if command == "/note" else "content"
+        body = text.split(maxsplit=1)[1].strip() if len(text.split(maxsplit=1)) == 2 else ""
+        if not body and not allow_empty:
+            raise ValueError(f"The {subject} is empty. Use {command} [graph name] content.")
+        match = re.match(r'''(?:"([^"]*)"|'([^']*)'|(\S+))(?:\s+|$)''', body) if body else None
+        if body and not match:
+            raise ValueError(f'Usage: {command} ["Graph name"] content. Close the graph name quotes.')
+        name = next(value for value in match.groups() if value is not None) if match else ""
+        graph = self.find_graph(name, user_id) if name else None
+        if graph:
+            body = body[match.end():].strip()
+        elif body.startswith(('"', "'")):
+            raise ValueError("Graph not available to you. Use /select_graph to choose an available graph.")
+        else:
+            graph = self.find_graph(self.selected_graph(user_id), user_id)
+        if not body and not allow_empty:
+            raise ValueError(f"The {subject} is empty. Add content after the graph name.")
+        if not graph:
+            raise ValueError(f'A graph is required to use {command} shorthand. Use /select_graph or {command} "Graph name" content.')
+        if not graph["enabled"]:
+            raise ValueError("Graph found, but bot setup is required: a scoped token, plus an encryption key for encrypted graphs.")
+        return graph, body
+
+    def note_draft(self, message, user_id):
+        text = message.get("text", message.get("caption", ""))
+        command = text.split(maxsplit=1)[:1]
+        row = self.db.execute("SELECT draft FROM note_drafts WHERE user_id=?", (user_id,)).fetchone()
+        if not row and command != ["/note"]:
+            return None, None
+        if row:
+            draft = json.loads(row[0])
+            if text.strip() == "/cancel":
+                self.db.execute("DELETE FROM note_drafts WHERE user_id=?", (user_id,))
+                return None, "Note draft discarded."
+            if text.strip() == "/done":
+                if not draft["text"].strip():
+                    raise ValueError("The note is empty. Send text first, or /cancel.")
+                return draft, None
+            if command and command[0].startswith("/"):
+                raise ValueError("A note is active. Send text, /done to save, or /cancel to discard.")
+        else:
+            graph, body = self.parse_submission(text, user_id, allow_empty=True)
+            if body:
+                return None, None
+            if (self.db.execute("SELECT 1 FROM checklist_drafts WHERE user_id=?", (user_id,)).fetchone()
+                    or self.db.execute("SELECT 1 FROM cooking_requests WHERE user_id=?", (user_id,)).fetchone()):
+                raise ValueError("Finish the active request with /done or /cancel before starting a note draft.")
+            draft = {"graph_id": graph["id"], "date": message["date"], "text": ""}
+        if any(message.get(k) for k in ("photo", "video", "document", "animation", "audio", "voice", "sticker", "video_note")):
+            raise ValueError("Send note text without attachments. /done saves; /cancel discards.")
+        if row:
+            if not text.strip():
+                raise ValueError("The note is empty. Send text, /done to save, or /cancel.")
+            draft["text"] += ("\n" if draft["text"] else "") + text.strip()
+        self.db.execute("INSERT INTO note_drafts VALUES (?,?) ON CONFLICT(user_id) DO UPDATE SET draft=excluded.draft",
+                        (user_id, json.dumps(draft)))
+        return None, "Note text added. /done saves; /cancel discards." if row else "Note started. Send text in separate messages. /done saves; /cancel discards."
 
     def parse_checklist(self, text, user_id):
         header, _, body = text.partition("\n")
@@ -605,11 +764,13 @@ class Inbox:
         commands = [
             {"command": "help", "description": "Show available commands and examples"},
             {"command": "select_graph", "description": "Show the current graph and select one using buttons"},
+            {"command": "note", "description": "Post to today's journal: /note [graph name] note text"},
             {"command": "checklist", "description": "Start a checklist: /checklist [name]"},
-            {"command": "done", "description": "Save the active checklist"},
-            {"command": "cancel", "description": "Cancel the cooking request or checklist draft"},
+            {"command": "done", "description": "Save the active note or checklist"},
+            {"command": "cancel", "description": "Cancel the active request or draft"},
             {"command": "analyze", "description": "Approve queued video analysis: /analyze reference"},
-            {"command": "cook", "description": "Extract a recipe: select, then send a video or link"},
+            {"command": "training", "description": "Analyze exercises: /training [graph name] link or text"},
+            {"command": "cook", "description": "Extract a recipe: /cook [graph name] link or text"},
         ]
         if user_id == self.admin_id:
             commands.append({"command": "users", "description": "Review and approve bot access requests"})
@@ -619,8 +780,11 @@ class Inbox:
 
     def help_text(self, user_id):
         text = "Available commands:\n" + "\n".join(f"/{c['command']} — {c['description']}" for c in self.commands(user_id))
+        text += '\n\nJournal note: /note Remember the milk, or /note "Graph name" Remember the milk. Select a graph with /select_graph to omit its name. Empty notes are ignored.'
+        text += '\nSend /note or /note "Graph name" alone to start a draft, then send text in separate messages. /done saves one multiline note; /cancel discards. Empty drafts are not saved.'
         text += ('\n\nExample checklist:\n/checklist "Graph name"\nBuy oats\nPrepare workout'
                  '\n\nOmit the graph name to use your selected graph. Or send /checklist [name] alone, then items in separate messages, then /done to save. /cancel discards the draft. Select a graph before starting. Other commands remain available while drafting. You can also send a video link or plain note outside checklist mode.')
+        text += '\n\nTraining: /training https://youtu.be/example or /training "Graph name" https://youtu.be/example. Cooking also accepts /cook "Graph name" https://youtu.be/example. These submissions do not require /done. Omit the graph name to use your selected graph.'
         text += "\n\nCooking: select /cook, then send a cooking video link or attachment. /cancel exits. Or send /cook https://youtu.be/example directly, or attach a video with /cook in its caption. Extracts ingredients and detailed steps; missing quantities are estimated and labeled when possible. Requires AI analysis to be enabled."
         if user_id == self.admin_id:
             text += "\n\nAccount management:\n/sync list\n/sync allow person@example.com\n/sync remove person@example.com"
@@ -665,9 +829,16 @@ class Inbox:
                         self.telegram("sendMessage", {"chat_id": sender["id"], "text": reply})
                     self.db.execute("UPDATE state SET offset=MAX(offset, ?) WHERE id=1", (update_id + 1,))
                     continue
-                if sender.get("id") in self.allowed and message.get("chat", {}).get("type") == "private":
+                if (sender.get("id") in self.allowed and message.get("chat", {}).get("type") == "private"
+                        and message["chat"].get("id") == sender["id"]):
                     text = message.get("text", message.get("caption", ""))
                     command = text.split(maxsplit=1)[:1]
+                    reply = self.graph_password(message, sender["id"])
+                    if reply is not None:
+                        if self.bot_token:
+                            self.telegram("sendMessage", {"chat_id": sender["id"], "text": reply})
+                        self.db.execute("UPDATE state SET offset=MAX(offset, ?) WHERE id=1", (update_id + 1,))
+                        continue
                     if command == ["/users"]:
                         if self.bot_token:
                             payload = (self.registration_panel() if sender["id"] == self.admin_id
@@ -721,13 +892,26 @@ class Inbox:
                         continue
                     attachment = message.get("video") or message.get("document") or message.get("animation")
                     checklist = command == ["/checklist"]
+                    note = command == ["/note"]
+                    training = command == ["/training"]
                     if self.logseq_users and str(sender["id"]) not in self.logseq_users and not self.registered_user(sender["id"]):
                         if self.bot_token:
                             self.telegram("sendMessage", {"chat_id": message["chat"]["id"],
                                                           "text": "Your Telegram account is not linked to Logseq. Ask the bot owner to configure it."})
                         self.db.execute("UPDATE state SET offset=MAX(offset, ?) WHERE id=1", (update_id + 1,))
                         continue
-                    cooking, reply = self.cooking_input(message, sender["id"])
+                    try:
+                        with self.activity(message["chat"]["id"], message.get("message_id")) if note and self.logseq_users else nullcontext():
+                            note_draft, reply = self.note_draft(message, sender["id"])
+                    except ValueError as error:
+                        note_draft, reply = None, str(error)
+                    if reply is not None:
+                        if self.bot_token:
+                            self.telegram("sendMessage", {"chat_id": sender["id"], "text": reply})
+                        self.db.execute("UPDATE state SET offset=MAX(offset, ?) WHERE id=1", (update_id + 1,))
+                        continue
+                    note = note or note_draft is not None
+                    cooking, reply = (False, None) if note or training else self.cooking_input(message, sender["id"])
                     if reply is not None:
                         if self.bot_token:
                             self.telegram("sendMessage", {"chat_id": message["chat"]["id"], "text": reply})
@@ -735,7 +919,7 @@ class Inbox:
                         continue
                     try:
                         with self.activity(message["chat"]["id"], message.get("message_id")) if checklist and self.logseq_users else nullcontext():
-                            draft, reply = self.checklist_draft(message, sender["id"])
+                            draft, reply = (None, None) if note else self.checklist_draft(message, sender["id"])
                     except ValueError as error:
                         draft, reply = None, str(error)
                     if reply is not None:
@@ -745,8 +929,28 @@ class Inbox:
                         continue
                     checklist = checklist or draft is not None
                     graph_id = self.selected_graph(sender["id"])
+                    if note or cooking or training:
+                        try:
+                            with self.activity(message["chat"]["id"], message.get("message_id")):
+                                if note_draft:
+                                    graph = self.find_graph(note_draft["graph_id"], sender["id"])
+                                    if not graph or not graph["enabled"]:
+                                        raise ValueError("This note's graph is no longer available. Draft retained; restore access or /cancel.")
+                                    text = note_draft["text"]
+                                else:
+                                    submission_text = text if command in (["/note"], ["/cook"], ["/training"]) else "/cook " + text
+                                    graph, text = self.parse_submission(submission_text, sender["id"], allow_empty=bool(attachment) and not note)
+                            graph_id = graph["id"]
+                            if note:
+                                attachment = None
+                        except ValueError as error:
+                            if self.bot_token:
+                                self.telegram("sendMessage", {"chat_id": sender["id"], "text": str(error)})
+                            self.db.execute("UPDATE state SET offset=MAX(offset, ?) WHERE id=1", (update_id + 1,))
+                            continue
                     with self.activity(message["chat"]["id"], message.get("message_id")) if self.logseq_users else nullcontext():
-                        graph = None if checklist else self.find_graph(graph_id, sender["id"])
+                        if not (note or cooking or training):
+                            graph = None if checklist else self.find_graph(graph_id, sender["id"])
                     if not checklist and self.registered_user(sender["id"]) and not graph:
                         if self.bot_token:
                             self.telegram("sendMessage", {"chat_id": sender["id"], "text": "No approved graph is selected. Use /select_graph or ask the owner to grant posting access."})
@@ -789,11 +993,18 @@ class Inbox:
                             record.update(kind="checklist", items=items, journal_day=int(local.strftime("%Y%m%d")),
                                           journal_date=local.date().isoformat(), checklist_title=draft["title"] if draft else "Checklist · " + local.strftime("%H:%M"),
                                           source_urls=[], analysis={"status": "not_requested", "transcript": None, "exercises": []})
+                        if note:
+                            local = datetime.fromtimestamp(note_draft["date"] if note_draft else message["date"], self.zone)
+                            record.update(kind="note", journal_day=int(local.strftime("%Y%m%d")),
+                                          journal_date=local.date().isoformat(), source_urls=[],
+                                          analysis={"status": "not_requested", "transcript": None, "exercises": []})
                         self.db.execute("INSERT OR IGNORE INTO submissions (id, record) VALUES (?, ?)", (update_id, json.dumps(record)))
                         if cooking:
                             self.db.execute("DELETE FROM cooking_requests WHERE user_id=?", (sender["id"],))
                         if draft:
                             self.db.execute("DELETE FROM checklist_drafts WHERE user_id=?", (sender["id"],))
+                        if note_draft:
+                            self.db.execute("DELETE FROM note_drafts WHERE user_id=?", (sender["id"],))
                 self.db.execute("UPDATE state SET offset=MAX(offset, ?) WHERE id=1", (update_id + 1,))
 
     def pending(self):
@@ -846,6 +1057,8 @@ class Inbox:
             return
         if record.get("kind") == "checklist":
             return self.publish_checklist(record)
+        if record.get("kind") == "note":
+            return self.publish_note(record)
         graph_id, token, key = self.graph_credentials(record)
         if not graph_id or not token:
             record["publish_status"] = "waiting_for_logseq"
@@ -893,6 +1106,26 @@ class Inbox:
             record["page_title"] = prepared.get("label", f"Training inbox - {record['id']}")
             self.save(record)
         request_json(base + f"/blocks/{quote(record['page_id'], safe='')}/children", {"position": "append", "blocks": prepared["blocks"]}, headers)
+        record["publish_status"] = "published"
+
+    def publish_note(self, record):
+        graph_id, token, key = self.graph_credentials(record)
+        if not token or key is None:
+            record["publish_status"] = "waiting_for_logseq" if not token else "waiting_for_logseq_key"
+            return
+        base = f"{self.api_url}/api/v1/graphs/{quote(graph_id, safe='')}"
+        headers = {"Authorization": "Bearer " + token}
+        if not record.get("encrypted_payload"):
+            title = self.encode_texts(base, headers, key, [record["original_text"]])[0]
+            record["encrypted_payload"] = {"graph_id": graph_id, "journal-day": record["journal_day"],
+                                           "blocks": [{"uuid": str(uuid.uuid5(uuid.NAMESPACE_URL, f"training-hub:{record['id']}:note:v1")),
+                                                       "title": title}]}
+            self.save(record)
+        prepared = record["encrypted_payload"]
+        if prepared["graph_id"] != graph_id or prepared["journal-day"] != record["journal_day"]:
+            raise ValueError("Prepared note belongs to another graph or date")
+        response = request_json(base + "/capture", {k: v for k, v in prepared.items() if k != "graph_id"}, headers)
+        record["page_id"] = response["page-id"]
         record["publish_status"] = "published"
 
     def publish_checklist(self, record):
@@ -1054,11 +1287,11 @@ class Inbox:
         # Save before external calls so outages cannot discard a submission.
         self.save(record)
         try:
-            if record.get("kind") != "checklist":
+            if record.get("kind") not in ("checklist", "note"):
                 self.download(record)
                 self.describe(record)
             self.publish(record)
-            if was_published and self.ai.enabled and record.get("kind") != "checklist":
+            if was_published and self.ai.enabled and record.get("kind") not in ("checklist", "note"):
                 self.analyze(record)
             record.pop("last_error", None)
         except (HTTPError, URLError, TimeoutError, OSError, ValueError, KeyError) as error:
@@ -1077,10 +1310,15 @@ class Inbox:
                 status = (f"Checklist saved: {len(record['items'])} items in {destination}." if record["publish_status"] == "published"
                           else f"Checklist saved in the inbox; delivery to {destination} is pending.")
                 ai_status = ""
+            if record.get("kind") == "note":
+                destination = f"{record['graph_name']} / journal {record['journal_date']}"
+                status = (f"Note saved in {destination}." if record["publish_status"] == "published"
+                          else f"Note saved in the inbox; delivery to {destination} is pending.")
+                ai_status = ""
             self.telegram("sendMessage", {"chat_id": record["chat_id"], "text": f"{status} {ai_status} Reference: {identifier}"})
             record["acknowledged"] = True
         done = record["publish_status"] == "published" and record["media_status"] != "pending" and record["acknowledged"]
-        if self.ai.enabled and record.get("kind") != "checklist":
+        if self.ai.enabled and record.get("kind") not in ("checklist", "note"):
             done = done and record["analysis"]["status"] not in RETRY_STATES
             done = done and record.get("page_title") == self.page_title(record)
             if record["analysis"]["status"] == "completed":

@@ -108,7 +108,7 @@ state_file.write_text(json.dumps(state, indent=2))
 state_file.chmod(0o600)
 sync_image = next(line.split("=", 1)[1] for line in (ROOT / ".env").read_text().splitlines()
                   if line.startswith("LOGSEQ_SYNC_IMAGE="))
-account_restricted = sync_image in ("training-hub-logseq-sync:69da7e-selfhost3", "training-hub-logseq-sync:69da7e-selfhost4", "training-hub-logseq-sync:69da7e-selfhost5", "training-hub-logseq-sync:69da7e-selfhost6")
+account_restricted = sync_image in ("training-hub-logseq-sync:69da7e-selfhost3", "training-hub-logseq-sync:69da7e-selfhost4", "training-hub-logseq-sync:69da7e-selfhost5", "training-hub-logseq-sync:69da7e-selfhost6", "training-hub-logseq-sync:69da7e-selfhost7")
 if account_restricted:
     policy = dict(line.split("=", 1) for line in (ROOT / ".secrets/sync-policy.env").read_text().splitlines() if "=" in line)
     if not policy.get("TRAINING_OWNER_EMAIL") or len(policy.get("TRAINING_ALLOWLIST_TOKEN", "")) < 64:
@@ -141,7 +141,7 @@ run([*ssh, "sudo cloud-init status --wait >/dev/null 2>&1 || true; if [ ! -f /va
 with tempfile.TemporaryDirectory() as temporary:
     sync_image = next(line.split("=", 1)[1] for line in (ROOT / ".env").read_text().splitlines()
                       if line.startswith("LOGSEQ_SYNC_IMAGE="))
-    if sync_image in ("training-hub-logseq-sync:69da7e-selfhost1", "training-hub-logseq-sync:69da7e-selfhost2", "training-hub-logseq-sync:69da7e-selfhost3", "training-hub-logseq-sync:69da7e-selfhost4", "training-hub-logseq-sync:69da7e-selfhost5", "training-hub-logseq-sync:69da7e-selfhost6"):
+    if sync_image in ("training-hub-logseq-sync:69da7e-selfhost1", "training-hub-logseq-sync:69da7e-selfhost2", "training-hub-logseq-sync:69da7e-selfhost3", "training-hub-logseq-sync:69da7e-selfhost4", "training-hub-logseq-sync:69da7e-selfhost5", "training-hub-logseq-sync:69da7e-selfhost6", "training-hub-logseq-sync:69da7e-selfhost7"):
         image_id = run(["docker", "image", "inspect", sync_image, "--format", "{{.Id}}"], capture_output=True).stdout.strip()
         remote_id = subprocess.run([*ssh, "docker image inspect " + sync_image + " --format '{{.Id}}'"],
                                    capture_output=True, text=True)
@@ -152,7 +152,7 @@ with tempfile.TemporaryDirectory() as temporary:
                 subprocess.run([*ssh, "docker load"], stdin=stream, check=True)
     archive = Path(temporary) / "training-hub.tar.gz"
     with tarfile.open(archive, "w:gz") as output:
-        for entry in ("compose.yaml", "Dockerfile", "requirements.txt", "requirements-import.txt", ".dockerignore", "README.md", "src", "workflows", "deploy", "scripts/setup.py", "scripts/pin-images.py", "scripts/smoke.py", ".env", ".secrets/logseq-token", ".secrets/logseq-encryption.json", ".secrets/gemini-api-key", ".secrets/sync-policy.env", ".secrets/logseq-graphs.json"):
+        for entry in ("compose.yaml", "Dockerfile", "requirements.txt", "requirements-import.txt", ".dockerignore", "README.md", "src", "workflows", "deploy", "scripts/setup.py", "scripts/pin-images.py", "scripts/smoke.py", "scripts/unlock-graph-key.mjs", ".env", ".secrets/logseq-token", ".secrets/logseq-encryption.json", ".secrets/gemini-api-key", ".secrets/sync-policy.env", ".secrets/logseq-graphs.json"):
             # An empty local placeholder must not erase a key configured on the server.
             if entry == ".secrets/gemini-api-key" and not (ROOT / entry).read_bytes().strip():
                 continue

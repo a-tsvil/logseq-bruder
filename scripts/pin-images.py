@@ -13,7 +13,7 @@ for index, line in enumerate(lines):
     if line.startswith(("N8N_IMAGE=", "LOGSEQ_SYNC_IMAGE=", "CADDY_IMAGE=")):
         name, image = line.split("=", 1)
         # This image is built from pinned source plus our checked-in patch.
-        if name == "LOGSEQ_SYNC_IMAGE" and image in ("training-hub-logseq-sync:69da7e-selfhost1", "training-hub-logseq-sync:69da7e-selfhost2", "training-hub-logseq-sync:69da7e-selfhost3", "training-hub-logseq-sync:69da7e-selfhost4", "training-hub-logseq-sync:69da7e-selfhost5", "training-hub-logseq-sync:69da7e-selfhost6"):
+        if name == "LOGSEQ_SYNC_IMAGE" and image in ("training-hub-logseq-sync:69da7e-selfhost1", "training-hub-logseq-sync:69da7e-selfhost2", "training-hub-logseq-sync:69da7e-selfhost3", "training-hub-logseq-sync:69da7e-selfhost4", "training-hub-logseq-sync:69da7e-selfhost5", "training-hub-logseq-sync:69da7e-selfhost6", "training-hub-logseq-sync:69da7e-selfhost7"):
             continue
         result = subprocess.run(["docker", "image", "inspect", image, "--format", "{{json .RepoDigests}}"],
                                 check=True, capture_output=True, text=True)
