@@ -361,8 +361,10 @@ there is no automatic resend after an uncertain outcome. A new click can duplica
 an image if Telegram accepted a previous upload whose response was lost.
 
 Slow searches, graph/account commands, graph discovery, and note/video processing
-show a working 👀 reaction on the original message and a typing indicator. Reactions
-are cleared when processing finishes, including errors. Image retrieval shows an
+show a steady 👀 reaction on the original message and a typing indicator. The eyes
+stay in place across validation, queueing, delivery, and AI processing, then change
+directly to 👌 on completion or 🤬 on errors (including handled failures). Reactions
+are never cleared between stages or refreshed with the typing indicator. Image retrieval shows an
 upload indicator. Typing/upload statuses refresh every four seconds; unsupported
 reactions or Telegram notification failures do not stop the underlying task.
 The command-line importer continues to print per-image progress in its terminal.

@@ -1,6 +1,6 @@
 """Private Telegram inbox with optional, bounded Gemini analysis."""
 import base64
-from contextlib import nullcontext
+from contextlib import ExitStack, nullcontext
 from datetime import datetime, timezone
 import hmac
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -21,11 +21,11 @@ import uuid
 from zoneinfo import ZoneInfo
 
 if __package__:
-    from .activity import telegram_activity
+    from .activity import activity_result, telegram_activity
     from .analysis import Analyzer, RETRY_STATES, render_analysis
     from .image_search import ImageIndex, render_matches
 else:
-    from activity import telegram_activity
+    from activity import activity_result, telegram_activity
     from analysis import Analyzer, RETRY_STATES, render_analysis
     from image_search import ImageIndex, render_matches
 
@@ -151,6 +151,7 @@ class Inbox:
         self.allowed.difference_update(row[0] for row in self.db.execute("SELECT user_id FROM bot_users WHERE status='denied'")
                                        if str(row[0]) != str(admin_id))
         self.bot_token = bot_token
+        self._reactions = {}
         self.graph_id = graph_id
         self.api_url = api_url.rstrip("/")
         self.token_file = Path(token_file) if token_file else None
@@ -163,12 +164,15 @@ class Inbox:
     def search_images(self, text, user_id):
         self.image_keyboard = None
         if not self.admin_id or user_id != self.admin_id:
+            activity_result("🤬")
             return "Image search is available only to the bot owner."
         if not self.image_search_enabled:
+            activity_result("🤬")
             return "Image search is disabled. Set IMAGE_SEARCH_ENABLED=true after importing selected chats."
         parts = text.split(maxsplit=1)
         query = parts[1].strip() if len(parts) == 2 else ""
         if not 1 <= len(query) <= 500:
+            activity_result("🤬")
             return "Use /search followed by a description of up to 500 characters."
         try:
             index = ImageIndex(self.data, self.ai.key_file, self.ai.text_model)
@@ -176,6 +180,7 @@ class Inbox:
             self.image_keyboard = index.keyboard(user_id, matches)
             return render_matches(matches)
         except (HTTPError, URLError, TimeoutError, OSError, ValueError, KeyError, TypeError, sqlite3.Error):
+            activity_result("🤬")
             return "Image search failed. Check the Gemini key, provider quota, and index configuration; retry later."
 
     def activity(self, chat_id, message_id=None, action="typing"):
@@ -374,14 +379,17 @@ class Inbox:
         try:
             return self._graph_command(text, user_id)
         except (HTTPError, URLError, TimeoutError, OSError):
+            activity_result("🤬")
             return "Unable to refresh shared graphs. Please try again later."
         except ValueError as error:
+            activity_result("🤬")
             return str(error)
 
     def _graph_command(self, text, user_id):
         try:
             args = shlex.split(text)
         except ValueError:
+            activity_result("🤬")
             return 'Use /select_graph, then tap a graph.'
         current = self.selected_graph(user_id)
         if args in (["/graphs"], ["/select_graph"], ["/select-graph"]):
@@ -409,6 +417,7 @@ class Inbox:
         if len(args) == 2 and args[0] == "/graph":
             graph = self.find_graph(args[1], user_id)
             if not graph:
+                activity_result("🤬")
                 return "Graph not available to you. Use /select_graph to choose an available graph."
             self.db.execute("DELETE FROM graph_unlocks WHERE user_id=?", (user_id,))
             if not graph["enabled"]:
@@ -416,6 +425,7 @@ class Inbox:
             self.db.execute("INSERT INTO user_graphs VALUES (?,?) ON CONFLICT(user_id) DO UPDATE SET graph_id=excluded.graph_id",
                             (user_id, graph["id"]))
             return "Selected graph: " + graph["name"]
+        activity_result("🤬")
         return 'Use /select_graph, then tap a graph.'
 
     def graph_callback(self, callback):
@@ -709,6 +719,7 @@ class Inbox:
 
     def sync_accounts(self, text, sender_id):
         if sender_id != self.admin_id or not self.allowlist_token or not self.api_url:
+            activity_result("🤬")
             return "Only the configured bot owner can manage sync accounts."
         parts = text.strip().split()
         if parts == ["/sync", "list"]:
@@ -716,18 +727,22 @@ class Inbox:
         elif len(parts) == 3 and parts[1] in ("allow", "remove"):
             email = parts[2].lower()
             if len(email) > 254 or not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", email):
+                activity_result("🤬")
                 return "Invalid email address."
             payload, method = {"email": email}, "PUT" if parts[1] == "allow" else "DELETE"
         else:
+            activity_result("🤬")
             return "Usage: /sync list | /sync allow <email> | /sync remove <email>"
         try:
             result = request_json(self.api_url + "/training/allowlist", payload,
                                   {"Authorization": "Bearer " + self.allowlist_token}, method=method)
         except HTTPError as error:
+            activity_result("🤬")
             status = error.code
             error.close()
             return "The owner account cannot be changed." if status == 400 else "Sync account update failed; retry later."
         except (URLError, TimeoutError, OSError, ValueError):
+            activity_result("🤬")
             return "Sync account update failed; retry later."
         if method == "GET":
             return "Allowed sync accounts:\n" + "\n".join([result["owner"] + " (owner)", *result["emails"]])
@@ -737,17 +752,22 @@ class Inbox:
     def approve_analysis(self, text, user_id=None):
         match = re.fullmatch(r"/analyze\s+(\d+)", text.strip())
         if not match:
+            activity_result("🤬")
             return "Usage: /analyze <reference>"
         row = self.db.execute("SELECT record FROM submissions WHERE id=?", (int(match[1]),)).fetchone()
         if not row:
+            activity_result("🤬")
             return "Unknown reference."
         record = json.loads(row[0])
         if self.registered_user(user_id) and record.get("submitted_by") != user_id:
+            activity_result("🤬")
             return "Reference not available to your account."
         graph_id = record.get("graph_id") or record.get("encrypted_payload", {}).get("graph_id") or self.graph_id
         if self.logseq_users and (user_id is None or not self.find_graph(graph_id, user_id)):
+            activity_result("🤬")
             return "Reference not available to your Logseq account."
         if record["analysis"]["status"] != "needs_approval":
+            activity_result("🤬")
             return "This submission is not waiting for video approval."
         record["analysis"].update(approved=True, status="pending_video")
         record["analysis"].pop("notified", None)
@@ -755,9 +775,17 @@ class Inbox:
         return f"Video analysis approved and queued. Reference: {record['id']}"
 
     def telegram(self, method, payload):
+        if method == "setMessageReaction":
+            target = (payload["chat_id"], payload["message_id"])
+            if self._reactions.get(target) == payload["reaction"]:
+                return True
         result = request_json(f"https://api.telegram.org/bot{self.bot_token}/{method}", payload)
         if not result.get("ok"):
             raise ValueError("Telegram request failed")
+        if method == "setMessageReaction":
+            self._reactions[target] = payload["reaction"]
+            if len(self._reactions) > 256:
+                del self._reactions[next(iter(self._reactions))]
         return result["result"]
 
     def commands(self, user_id):
@@ -804,8 +832,9 @@ class Inbox:
 
     def remember(self, updates):
         searched = False
-        with self.db:
+        with ExitStack() as processing, self.db:
             for update in updates:
+                processing.close()
                 update_id = update["update_id"]
                 if update_id < self.db.execute("SELECT offset FROM state WHERE id=1").fetchone()[0]:
                     continue
@@ -839,7 +868,12 @@ class Inbox:
                             self.telegram("sendMessage", {"chat_id": sender["id"], "text": reply})
                         self.db.execute("UPDATE state SET offset=MAX(offset, ?) WHERE id=1", (update_id + 1,))
                         continue
+                    if command == ["/search"] and sender["id"] == self.admin_id and self.image_search_enabled and searched:
+                        break
+                    processing.enter_context(self.activity(message["chat"]["id"], message.get("message_id")))
                     if command == ["/users"]:
+                        if sender["id"] != self.admin_id:
+                            activity_result("🤬")
                         if self.bot_token:
                             payload = (self.registration_panel() if sender["id"] == self.admin_id
                                        else {"chat_id": sender["id"], "text": "Only the bot owner can review access requests."})
@@ -849,17 +883,14 @@ class Inbox:
                     if command == ["/search"]:
                         # Bound embedding I/O per polling pass; leave later updates unacknowledged.
                         if sender["id"] == self.admin_id and self.image_search_enabled:
-                            if searched:
-                                break
                             searched = True
-                        with self.activity(message["chat"]["id"], message.get("message_id")):
-                            reply = self.search_images(text, sender["id"])
-                            if self.bot_token:
-                                payload = {"chat_id": message["chat"]["id"], "text": reply,
-                                           "link_preview_options": {"is_disabled": True}}
-                                if getattr(self, "image_keyboard", None):
-                                    payload["reply_markup"] = self.image_keyboard
-                                self.telegram("sendMessage", payload)
+                        reply = self.search_images(text, sender["id"])
+                        if self.bot_token:
+                            payload = {"chat_id": message["chat"]["id"], "text": reply,
+                                       "link_preview_options": {"is_disabled": True}}
+                            if getattr(self, "image_keyboard", None):
+                                payload["reply_markup"] = self.image_keyboard
+                            self.telegram("sendMessage", payload)
                         self.db.execute("UPDATE state SET offset=MAX(offset, ?) WHERE id=1", (update_id + 1,))
                         continue
                     if command in (["/help"], ["/start"]):
@@ -868,8 +899,7 @@ class Inbox:
                         self.db.execute("UPDATE state SET offset=MAX(offset, ?) WHERE id=1", (update_id + 1,))
                         continue
                     if command in (["/select_graph"], ["/select-graph"], ["/graph"], ["/graphs"]):
-                        with self.activity(message["chat"]["id"], message.get("message_id")):
-                            reply = self.graph_command(text, sender["id"])
+                        reply = self.graph_command(text, sender["id"])
                         if self.bot_token:
                             payload = {"chat_id": message["chat"]["id"], "text": reply}
                             if self.graph_keyboard is not None:
@@ -878,8 +908,7 @@ class Inbox:
                         self.db.execute("UPDATE state SET offset=MAX(offset, ?) WHERE id=1", (update_id + 1,))
                         continue
                     if text.split(maxsplit=1)[:1] == ["/sync"]:
-                        with self.activity(message["chat"]["id"], message.get("message_id")):
-                            reply = self.sync_accounts(text, sender["id"])
+                        reply = self.sync_accounts(text, sender["id"])
                         if self.bot_token:
                             self.telegram("sendMessage", {"chat_id": message["chat"]["id"], "text": reply})
                         self.db.execute("UPDATE state SET offset=MAX(offset, ?) WHERE id=1", (update_id + 1,))
@@ -895,15 +924,16 @@ class Inbox:
                     note = command == ["/note"]
                     training = command == ["/training"]
                     if self.logseq_users and str(sender["id"]) not in self.logseq_users and not self.registered_user(sender["id"]):
+                        activity_result("🤬")
                         if self.bot_token:
                             self.telegram("sendMessage", {"chat_id": message["chat"]["id"],
                                                           "text": "Your Telegram account is not linked to Logseq. Ask the bot owner to configure it."})
                         self.db.execute("UPDATE state SET offset=MAX(offset, ?) WHERE id=1", (update_id + 1,))
                         continue
                     try:
-                        with self.activity(message["chat"]["id"], message.get("message_id")) if note and self.logseq_users else nullcontext():
-                            note_draft, reply = self.note_draft(message, sender["id"])
+                        note_draft, reply = self.note_draft(message, sender["id"])
                     except ValueError as error:
+                        activity_result("🤬")
                         note_draft, reply = None, str(error)
                     if reply is not None:
                         if self.bot_token:
@@ -918,9 +948,9 @@ class Inbox:
                         self.db.execute("UPDATE state SET offset=MAX(offset, ?) WHERE id=1", (update_id + 1,))
                         continue
                     try:
-                        with self.activity(message["chat"]["id"], message.get("message_id")) if checklist and self.logseq_users else nullcontext():
-                            draft, reply = (None, None) if note else self.checklist_draft(message, sender["id"])
+                        draft, reply = (None, None) if note else self.checklist_draft(message, sender["id"])
                     except ValueError as error:
+                        activity_result("🤬")
                         draft, reply = None, str(error)
                     if reply is not None:
                         if reply and self.bot_token:
@@ -931,27 +961,27 @@ class Inbox:
                     graph_id = self.selected_graph(sender["id"])
                     if note or cooking or training:
                         try:
-                            with self.activity(message["chat"]["id"], message.get("message_id")):
-                                if note_draft:
-                                    graph = self.find_graph(note_draft["graph_id"], sender["id"])
-                                    if not graph or not graph["enabled"]:
-                                        raise ValueError("This note's graph is no longer available. Draft retained; restore access or /cancel.")
-                                    text = note_draft["text"]
-                                else:
-                                    submission_text = text if command in (["/note"], ["/cook"], ["/training"]) else "/cook " + text
-                                    graph, text = self.parse_submission(submission_text, sender["id"], allow_empty=bool(attachment) and not note)
+                            if note_draft:
+                                graph = self.find_graph(note_draft["graph_id"], sender["id"])
+                                if not graph or not graph["enabled"]:
+                                    raise ValueError("This note's graph is no longer available. Draft retained; restore access or /cancel.")
+                                text = note_draft["text"]
+                            else:
+                                submission_text = text if command in (["/note"], ["/cook"], ["/training"]) else "/cook " + text
+                                graph, text = self.parse_submission(submission_text, sender["id"], allow_empty=bool(attachment) and not note)
                             graph_id = graph["id"]
                             if note:
                                 attachment = None
                         except ValueError as error:
+                            activity_result("🤬")
                             if self.bot_token:
                                 self.telegram("sendMessage", {"chat_id": sender["id"], "text": str(error)})
                             self.db.execute("UPDATE state SET offset=MAX(offset, ?) WHERE id=1", (update_id + 1,))
                             continue
-                    with self.activity(message["chat"]["id"], message.get("message_id")) if self.logseq_users else nullcontext():
-                        if not (note or cooking or training):
-                            graph = None if checklist else self.find_graph(graph_id, sender["id"])
+                    if not (note or cooking or training):
+                        graph = None if checklist else self.find_graph(graph_id, sender["id"])
                     if not checklist and self.registered_user(sender["id"]) and not graph:
+                        activity_result("🤬")
                         if self.bot_token:
                             self.telegram("sendMessage", {"chat_id": sender["id"], "text": "No approved graph is selected. Use /select_graph or ask the owner to grant posting access."})
                         self.db.execute("UPDATE state SET offset=MAX(offset, ?) WHERE id=1", (update_id + 1,))
@@ -961,16 +991,16 @@ class Inbox:
                         try:
                             if attachment:
                                 raise ValueError("Send /checklist as a text message without an attachment.")
-                            with self.activity(message["chat"]["id"], message.get("message_id")) if self.logseq_users else nullcontext():
-                                if draft:
-                                    graph = self.find_graph(draft["graph_id"], sender["id"])
-                                    if not graph or not graph["enabled"]:
-                                        raise ValueError("This checklist's graph is no longer available. Draft retained; ask the owner to restore access, or /cancel.")
-                                    items = draft["items"]
-                                else:
-                                    graph, items = self.parse_checklist(text, sender["id"])
+                            if draft:
+                                graph = self.find_graph(draft["graph_id"], sender["id"])
+                                if not graph or not graph["enabled"]:
+                                    raise ValueError("This checklist's graph is no longer available. Draft retained; ask the owner to restore access, or /cancel.")
+                                items = draft["items"]
+                            else:
+                                graph, items = self.parse_checklist(text, sender["id"])
                             graph_id = graph["id"]
                         except ValueError as error:
+                            activity_result("🤬")
                             if self.bot_token:
                                 self.telegram("sendMessage", {"chat_id": message["chat"]["id"], "text": str(error)})
                             self.db.execute("UPDATE state SET offset=MAX(offset, ?) WHERE id=1", (update_id + 1,))
@@ -1005,6 +1035,7 @@ class Inbox:
                             self.db.execute("DELETE FROM checklist_drafts WHERE user_id=?", (sender["id"],))
                         if note_draft:
                             self.db.execute("DELETE FROM note_drafts WHERE user_id=?", (sender["id"],))
+                        activity_result(None)
                 self.db.execute("UPDATE state SET offset=MAX(offset, ?) WHERE id=1", (update_id + 1,))
 
     def pending(self):
@@ -1328,6 +1359,11 @@ class Inbox:
             if record["analysis"]["status"] in NOTICE_STATES:
                 done = done and record["analysis"].get("notified", False)
         self.save(record, done=done)
+        if (record.get("last_error") or record["publish_status"] != "published" or record["media_status"] == "too_large"
+                or record["analysis"]["status"] in {"needs_review", "video_unavailable", "quota_wait", "retry_wait", "waiting_for_key"}):
+            activity_result("🤬")
+        elif not done:
+            activity_result(None)
         return {"id": identifier, "publish_status": record["publish_status"], "media_status": record["media_status"], "analysis_status": record["analysis"]["status"]}
 
 
